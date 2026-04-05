@@ -26,6 +26,7 @@ typedef enum {
     O_LT,
     O_GT,
     O_CONS, // ::
+    O_DOT,  // .   // for accessing fields of map or array length
 } Operator;
 
 Operator operator_from_str(const char *op);

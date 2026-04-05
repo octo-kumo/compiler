@@ -97,6 +97,33 @@ typecheck_result_t tc_binary_op(Expr *expr, TCVarTypeScope *scope) {
         // handled as a EAssignment
         return TC_ERR("Unexpected assignment operator in expression", expr);
     }
+    if (expr->as.op_node.op == O_DOT) {
+        // seperate logic for obj.key
+        typecheck_result_t left_res = tc_expr(expr->as.op_node.left, scope);
+        if (!left_res.is_ok) { return left_res; }
+        if (left_res.type->base != VAL_MAP) {
+            return TC_ERR("Left-hand side of dot operator must be a map",
+                          expr->as.op_node.left);
+        }
+        // right side must be a identifier
+        if (expr->as.op_node.right->kind != EXPR_EVAR) {
+            return TC_ERR(
+                "Right-hand side of dot operator must be an identifier",
+                expr->as.op_node.right);
+        }
+        const char *key = expr->as.op_node.right->as.evar;
+        type_t *value_type = NULL;
+        for (size_t i = 0; i < left_res.type->as.map.count; i++) {
+            if (strcmp(left_res.type->as.map.entries[i].key, key) == 0) {
+                value_type = left_res.type->as.map.entries[i].value;
+                break;
+            }
+        }
+        if (!value_type) {
+            return TC_ERR("Key not found in map", expr->as.op_node.right);
+        }
+        return TC_OK(value_type);
+    }
     // these ops only work on numbers, and should only produce numbers, may be
     // int or float, we allow mix use, which would result in float
 
@@ -130,6 +157,9 @@ typecheck_result_t tc_binary_op(Expr *expr, TCVarTypeScope *scope) {
     // special case, if any one side is string, this is string concat operator
     if ((left_res.type->base == VAL_STR || right_res.type->base == VAL_STR) &&
         expr->as.op_node.op == O_ADD) {
+        printf("[typecheck warning] implicit string concatenation\n");
+        ast_print_code(stdout, expr, 0);
+        printf("\n\n");
         return TC_OK(TYPE_STR);
     }
 

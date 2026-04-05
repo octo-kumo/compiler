@@ -352,8 +352,8 @@ void ast_print_code(FILE *out, Expr *expr, int indent) {
 
     case EXPR_EBLOCK: ast_print_block(out, expr, indent); break;
     case EXPR_ECALL:
-        fprintf(out, ANSI_GREEN "%s" ANSI_RESET "(",
-                expr->as.call_node.callee->as.evar);
+        ast_print_code(out, expr->as.call_node.callee, indent);
+        fprintf(out, "(");
         for (size_t i = 0; i < expr->as.call_node.arg_count; i++) {
             if (i > 0) { fprintf(out, ", "); }
             ast_print_code(out, expr->as.call_node.args[i], indent);

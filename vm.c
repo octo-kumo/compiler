@@ -341,7 +341,9 @@ VMValue *vm_execute(VMVariableScope *scope, Expr *expr) {
     }
     case EXPR_EOP: {
         VMValue *left = vm_execute(scope, expr->as.op_node.left);
-        VMValue *right = vm_execute(scope, expr->as.op_node.right);
+        VMValue *right = expr->as.op_node.op == O_DOT
+                             ? NULL
+                             : vm_execute(scope, expr->as.op_node.right);
 
 #define __REQUIRES_NUMERIC()                                                   \
     if ((left->type != VAL_LONG && left->type != VAL_FLOAT) ||                 \
@@ -475,6 +477,29 @@ VMValue *vm_execute(VMVariableScope *scope, Expr *expr) {
             }
             val->type = VAL_ARR;
             val->data.arr = new_arr;
+        }
+        case O_DOT: {
+            if (left->type == VAL_MAP &&
+                expr->as.op_node.right->kind == EXPR_EVAR) {
+                // map access with dot notation, e.g. mymap.key
+                char *key = expr->as.op_node.right->as.evar;
+                VMValue *value = NULL;
+                for (size_t i = 0; i < left->data.map->count; i++) {
+                    if (strcmp(left->data.map->entries[i].key, key) == 0) {
+                        value = left->data.map->entries[i].value;
+                        break;
+                    }
+                }
+                if (!value) {
+                    fprintf(stderr, "Key '%s' not found in map\n", key);
+                    exit(1);
+                }
+                val = val_clone(value);
+            } else {
+                fprintf(stderr, "Dot operator is only supported for map access "
+                                "with string keys\n");
+                exit(1);
+            }
         }
         }
         val_free(left);

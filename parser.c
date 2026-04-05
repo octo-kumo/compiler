@@ -959,10 +959,10 @@ ast_parser_result_t ast__parse_first(const ast_parser_t *parsers,
 #define __EXPR_BLOCK_PARSERS ast_parse_brace_block
 
 #define __EXPR_INLINE_PARSERS                                                  \
-    ast_parse_function, ast_parse_map, ast_parse_array, ast_parse_binary_op,   \
-        ast_parse_function_call, ast_parse_paren_expr, ast_parse_if,           \
-        ast_parse_declaration, ast_parse_number, ast_parse_string,             \
-        ast_parse_array_idx, ast_parse_variable
+    ast_parse_function, ast_parse_map, ast_parse_array,                        \
+        ast_parse_function_call, ast_parse_binary_op, ast_parse_paren_expr,    \
+        ast_parse_if, ast_parse_declaration, ast_parse_number,                 \
+        ast_parse_string, ast_parse_array_idx, ast_parse_variable
 
 const ast_parser_t EXPR_BLOCK_PARSERS[] = {__EXPR_BLOCK_PARSERS, NULL};
 const ast_parser_t EXPR_INLINE_PARSERS[] = {__EXPR_INLINE_PARSERS, NULL};
