@@ -1,0 +1,158 @@
+#ifndef C_AST_H
+#define C_AST_H
+#include "list.h"
+#include "type.h"
+#include <stdbool.h>
+#include <stdlib.h>
+
+// extern const char *TYPE_STRS[];
+extern const char *OPERATORS[];
+// const char *OPERATORS[] = {"<=", ">=", "&&", "||", "==", "!=", "+",
+//                            "-",  "*",  "/",  "=",  "<",  ">",  NULL};
+extern const char *KEYWORDS[];
+
+typedef enum {
+    O_GTE,
+    O_LTE,
+    O_AND,
+    O_OR,
+    O_EQ,
+    O_NEQ,
+    O_ADD,
+    O_SUB,
+    O_MUL,
+    O_DIV,
+    O_ASSIGN,
+    O_LT,
+    O_GT,
+    O_CONS, // ::
+} Operator;
+
+Operator operator_from_str(const char *op);
+const char *operator_to_str(Operator op);
+
+typedef enum {
+    EXPR_ELONG,
+    EXPR_EBOOL,
+    EXPR_EFLOAT,
+    EXPR_EARRAY,
+    EXPR_EARRAY_IDX,
+    EXPR_EARRAY_IDX_RANGE,
+    EXPR_EMAP,
+    EXPR_ESTR,
+    EXPR_EFUNC,
+    EXPR_EVAR,
+    EXPR_EIF,
+    EXPR_EOP,
+    EXPR_EASSIGNMENT,
+    EXPR_EDECLARATION,
+    EXPR_ECALL,
+    EXPR_EBLOCK,
+} ExprKind;
+
+typedef enum {
+    DECL_CONST,
+    DECL_LET,
+    DECL_FUNC,
+} DeclarationKind;
+
+struct Expr;
+
+typedef struct {
+    char *data;
+    int length;
+} EStr;
+
+typedef struct {
+    size_t param_count;
+    char **param_names;
+    type_t **param_types; // for type checking, not used in execution
+    type_t *return_type;  // for type checking, not used in execution
+    struct Expr *body;
+    bool external; // Indicates if this is an external function (built-in) or a
+                   // user-defined one
+} EFunc;
+
+typedef struct {
+    struct Expr *cond;
+    struct Expr *then_branch;
+    struct Expr *else_branch; // can be NULL
+} EIf;
+
+typedef struct {
+    Operator op;
+    struct Expr *left;
+    struct Expr *right;
+} EOp;
+
+typedef struct {
+    char *var_name;
+    struct Expr *value;
+} EAssignment;
+
+typedef struct {
+    size_t count;
+    struct Expr **exprs;
+} EBlock;
+
+typedef struct {
+    DeclarationKind kind;
+    char *name;
+    struct Expr *value;
+} EDeclaration;
+
+typedef struct {
+    struct Expr *callee;
+    size_t arg_count;
+    struct Expr **args;
+} ECall;
+
+typedef struct {
+    size_t count;
+    LIST(struct Expr *) elements;
+} EArray;
+typedef struct {
+    struct Expr *array;
+
+    struct Expr *start;
+    struct Expr *end;
+} EArrayIdxRange;
+typedef struct {
+    struct Expr *array;
+    struct Expr *idx;
+} EArrayIdx;
+typedef struct {
+    char *key;
+    struct Expr *value;
+} EMapEntry;
+typedef struct {
+    size_t count;
+    LIST(EMapEntry) entries;
+} EMap;
+
+typedef struct Expr {
+    ExprKind kind;
+    union {
+        long elong;
+        double efloat;
+        char *evar;
+        bool ebool;
+        EStr estr;
+        EFunc efunc;
+        EIf if_node;
+        EOp op_node;
+        EAssignment assignment_node;
+        EDeclaration declaration_node;
+        ECall call_node;
+        EBlock block_node;
+        EArray array_node;
+        EArrayIdx array_idx_node;
+        EArrayIdxRange array_idx_range_node;
+        EMap map_node;
+    } as;
+} Expr;
+
+void ast_free(Expr *expr);
+Expr *ast_clone(Expr *expr);
+
+#endif

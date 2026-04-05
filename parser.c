@@ -1,0 +1,1018 @@
+#include "parser.h"
+#include "ast.h"
+#include "list.h"
+#include "type.h"
+#include <ctype.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+void free_list(list_t *list) {
+    while (list) {
+        list_t *next = list->next;
+        free(list);
+        list = next;
+    }
+}
+
+#define some(v, r)                                                             \
+    ((parser_result_t){                                                        \
+        .is_some = 1, .remaining = (char *)(r), .value = (void *)(v)})
+#define none(r)                                                                \
+    ((parser_result_t){.is_some = 0, .remaining = (char *)(r), .value = NULL})
+#define asome(v, r)                                                            \
+    ((ast_parser_result_t){                                                    \
+        .is_some = 1, .remaining = (char *)(r), .value = (Expr *)(v)})
+#define anone(r)                                                               \
+    ((ast_parser_result_t){                                                    \
+        .is_some = 0, .remaining = (char *)(r), .value = NULL})
+
+void *char_to_int(void *c) { return (void *)((uintptr_t)c - (uintptr_t)'0'); }
+void *char_to_sign(void *c) {
+    return (void *)((uintptr_t)c == (uintptr_t)'-' ? (void *)-1 : (void *)1);
+}
+
+int is_digit(char c) { return c >= '0' && c <= '9'; }
+int is_alpha(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+int is_number_sign(char c) { return c == '+' || c == '-'; }
+int is_space(char c) { return c == ' ' || c == '\t' || c == '\n'; }
+
+char *skip_spaces(const char *input) {
+    while (*input && is_space(*input)) { input++; }
+    return (char *)input;
+}
+
+parser_result_t parse_satisfy(const char *input, int (*predicate)(char)) {
+    if (!input || input[0] == '\0') { return none(input); }
+    if (predicate(input[0])) { return some((uintptr_t)(input[0]), input + 1); }
+    return none(input);
+}
+
+parser_result_t parse_map(parser_result_t res, void *(*f)(void *)) {
+    if (res.is_some) { return some(f(res.value), res.remaining); }
+    return none(res.remaining);
+}
+#define MAKE_TAKE_PARSER(name, pred)                                           \
+    parser_result_t parse_take_##name(const char *input) {                     \
+        return parse_satisfy(input, pred);                                     \
+    }
+
+#define MAKE_MAP_PARSER(name, pred, mapper)                                    \
+    parser_result_t parse_##name(const char *input) {                          \
+        return parse_map(parse_satisfy(input, pred),                           \
+                         (void *(*)(void *))mapper);                           \
+    }
+
+MAKE_TAKE_PARSER(space, is_space);
+MAKE_MAP_PARSER(digit, is_digit, char_to_int);
+MAKE_MAP_PARSER(number_sign, is_number_sign, char_to_sign);
+MAKE_TAKE_PARSER(alpha, is_alpha);
+
+long digit_list_to_long(list_t *digits) {
+    long number = 0;
+    while (digits) {
+        number = number * 10 + (uintptr_t)digits->value;
+        digits = digits->next;
+    }
+    return number;
+}
+
+char *char_list_to_str(list_t *chars) {
+    size_t len = 0;
+    list_t *current = chars;
+    while (current) {
+        len++;
+        current = current->next;
+    }
+    char *str = (char *)malloc(len + 1);
+    str[len] = '\0';
+    current = chars;
+    for (size_t i = 0; i < len; i++) {
+        str[i] = (char)(uintptr_t)current->value;
+        current = current->next;
+    }
+    return str;
+}
+
+parser_result_t parse_alt(parser_result_t (*p1)(const char *),
+                          parser_result_t (*p2)(const char *),
+                          const char *input) {
+    parser_result_t res1 = p1(input);
+    if (res1.is_some) { return res1; }
+    return p2(input);
+}
+
+parser_result_t parse_seq(parser_list_t *parsers, const char *input) {
+    if (!parsers) return none(input);
+    parser_result_t res = parsers->parser(input);
+    if (!res.is_some) return none(input);
+    parser_result_t w = parse_seq(parsers->next, res.remaining);
+    if (!w.is_some) return none(input);
+    // Combine res.value and w.value into a list
+    list_t *combined = (list_t *)malloc(sizeof(list_t));
+    combined->value = res.value;
+    combined->next = (list_t *)w.value;
+    return some(combined, w.remaining);
+}
+
+parser_result_t of_value(void *v, const char *input) { return some(v, input); }
+
+parser_result_t of_null(const char *input) { return some(NULL, input); }
+
+parser_result_t parse_bind(parser_t p, void *(*f)(void *), const char *input) {
+    parser_result_t res = p(input);
+    if (res.is_some) { return some(f(res.value), res.remaining); }
+    return none(input);
+}
+
+parser_result_t parse_some(parser_t p, const char *input) {
+    parser_result_t res = p(input);
+    if (!res.is_some) { return none(input); }
+    parser_result_t w = parse_many(p, res.remaining);
+    list_t *combined = (list_t *)malloc(sizeof(list_t));
+    combined->value = res.value;
+    combined->next = (list_t *)w.value;
+    return some(combined, w.remaining);
+}
+
+parser_result_t parse_many(parser_t p, const char *input) {
+    parser_result_t res = parse_some(p, input);
+    if (res.is_some) { return res; }
+    return of_null(input);
+}
+
+parser_result_t parse_long(const char *input) {
+    const char *original_input = input;
+    input = skip_spaces(input);
+    parser_result_t sign = parse_number_sign(input);
+    int sign_value = sign.is_some ? (int)(uintptr_t)sign.value : 1;
+    input = sign.remaining;
+
+    parser_result_t res = parse_some(parse_digit, input);
+    if (!res.is_some) { return none(original_input); }
+    long number = sign_value * digit_list_to_long((list_t *)res.value);
+    free_list((list_t *)res.value);
+    return some((void *)(uintptr_t)number, res.remaining);
+}
+
+parser_result_t parse_keyword(const char *input, const char *KEYWORDS[]) {
+    const char *original_input = input;
+    input = skip_spaces(input);
+    for (size_t i = 0; KEYWORDS[i]; i++) {
+        const char *kw = KEYWORDS[i];
+        size_t len = strlen(kw);
+        if (strncmp(input, kw, len) == 0 && !isalpha(input[len])) {
+            return some((void *)kw, input + len);
+        }
+    }
+    return none(original_input);
+}
+parser_result_t parse_symbol(const char *input, char sym) {
+    input = skip_spaces(input);
+    if (input && *input == sym) {
+        return some((void *)(uintptr_t)sym, input + 1);
+    }
+    return none(input);
+}
+
+parser_result_t parse_operator(const char *input, const char *OPERATORS[]) {
+    const char *original_input = input;
+    input = skip_spaces(input);
+    for (size_t i = 0; OPERATORS[i]; i++) {
+        const char *op = OPERATORS[i];
+        size_t len = strlen(op);
+        if (strncmp(input, op, len) == 0) {
+            return some(operator_from_str(op), input + len);
+        }
+    }
+    return none(original_input);
+}
+
+parser_result_t parse_identifier(const char *input) {
+    const char *original_input = input;
+    input = skip_spaces(input);
+    if (!input || input[0] == '\0' || !isalpha(input[0])) {
+        return none(original_input);
+    }
+    parser_result_t res = parse_some(parse_take_alpha, input);
+    if (!res.is_some) { return none(original_input); }
+    char *identifier = char_list_to_str((list_t *)res.value);
+
+    // check if identifier is a keyword
+    for (size_t i = 0; KEYWORDS[i]; i++) {
+        if (strcmp(identifier, KEYWORDS[i]) == 0) {
+            free(identifier);
+            free_list((list_t *)res.value);
+            return none(original_input);
+        }
+    }
+
+    free_list((list_t *)res.value);
+    return some(identifier, res.remaining);
+}
+
+parser_result_t parse_type(const char *input, bool allow_complex_types);
+parser_result_t __parse_type_group(const char *input) {
+    // (type, type) or (type) or type or ()
+    // ((type, type) -> type) is also valid
+    const char *original_input = input;
+
+    // try to parse (type, type, ...)
+    parser_result_t left_paren = parse_symbol(input, '(');
+    if (!left_paren.is_some) {
+        // try to parse type directly, if success its just a single type,
+        // because (...,...) composite types is not a simple type.
+        parser_result_t ltype = parse_type(input, false);
+        if (ltype.is_some) {
+            LIST(type_t *) types = NULL;
+            list_init(type_t *, types);
+            list_push(type_t *, types, ((type_t *)ltype.value));
+            return some(types, ltype.remaining);
+        } else {
+            return none(original_input);
+        }
+    }
+    input = left_paren.remaining;
+    LIST(type_t *) types = NULL;
+    list_init(type_t *, types);
+    while (1) {
+        parser_result_t type_res = parse_type(input, true);
+        if (!type_res.is_some) break;
+        list_push(type_t *, types, ((type_t *)type_res.value));
+        input = type_res.remaining;
+        parser_result_t comma_res = parse_symbol(input, ',');
+        if (comma_res.is_some) {
+            input = comma_res.remaining;
+        } else {
+            break;
+        }
+    }
+    parser_result_t right_paren = parse_symbol(input, ')');
+    if (!right_paren.is_some) {
+        list_free(types);
+        return none(original_input);
+    }
+    return some(types, right_paren.remaining);
+}
+
+parser_result_t __parse_function_type(const char *input) {
+    // (type, type, ...) -> type
+    // type->type is also valid
+    // ()->()
+    const char *original_input = input;
+    parser_result_t params_res = __parse_type_group(input);
+    if (!params_res.is_some) return none(original_input);
+    LIST(type_t *) param_types = (LIST(type_t *))params_res.value;
+    input = params_res.remaining;
+    parser_result_t arrow_res =
+        parse_operator(input, (const char *[]){"->", NULL});
+    if (!arrow_res.is_some) {
+        list_free(param_types);
+        return none(original_input);
+    }
+    input = arrow_res.remaining;
+    parser_result_t return_type_res = parse_type(input, true);
+    if (!return_type_res.is_some) {
+        list_free(param_types);
+        return none(original_input);
+    }
+    type_t *return_type = (type_t *)return_type_res.value;
+    type_t *func_type = tc_make_t(VAL_FUNC);
+    func_type->as.func.param_count = list_count(param_types);
+    func_type->as.func.param_types = param_types;
+    func_type->as.func.return_type = return_type;
+    return some(func_type, return_type_res.remaining);
+}
+parser_result_t __parse_type(const char *input, bool allow_complex_types) {
+    const char *original_input = input;
+    /*
+    the type can be the following
+    - a built-in type: long, float, bool, str
+    - an array type: [type]
+    - a map type: {key: type, key: type, ...}
+    - a function type: (type, type, ...) -> type
+    */
+    // because type->type starts with a perfectly valid type, we need to parse
+    // functions first
+    if (allow_complex_types) {
+        parser_result_t func_res = __parse_function_type(input);
+        if (func_res.is_some) return func_res;
+    }
+    input = original_input;
+    const char *built_in_types[] = {"long", "float", "bool", "str", NULL};
+    parser_result_t kw_res = parse_keyword(input, built_in_types);
+    if (kw_res.is_some) {
+        if (strcmp((char *)kw_res.value, "long") == 0) {
+            return some(TYPE_LONG, kw_res.remaining);
+        } else if (strcmp((char *)kw_res.value, "float") == 0) {
+            return some(TYPE_FLOAT, kw_res.remaining);
+        } else if (strcmp((char *)kw_res.value, "bool") == 0) {
+            return some(TYPE_BOOL, kw_res.remaining);
+        } else if (strcmp((char *)kw_res.value, "str") == 0) {
+            return some(TYPE_STR, kw_res.remaining);
+        }
+    }
+    // assume built-in type parse failed, now try parsing arrays
+    parser_result_t arr_start = parse_symbol(input, '[');
+    if (arr_start.is_some) {
+        parser_result_t elem_type_res = parse_type(arr_start.remaining, true);
+        if (!elem_type_res.is_some) return none(original_input);
+        parser_result_t arr_end = parse_symbol(elem_type_res.remaining, ']');
+        if (!arr_end.is_some) return none(original_input);
+        type_t *elem_type = (type_t *)elem_type_res.value;
+        type_t *arr_type = tc_make_t(VAL_ARR);
+        arr_type->as.array.element_type = elem_type;
+        return some(arr_type, arr_end.remaining);
+    }
+    input = original_input;
+    // assume array parse failed, now try parsing maps
+    parser_result_t map_start = parse_symbol(input, '{');
+    if (map_start.is_some) {
+        // {key: type, key: type, ...}
+        type_map_entry_t *entries = NULL;
+        size_t count = 0;
+        input = map_start.remaining;
+        while (1) {
+            parser_result_t key_res = parse_identifier(input);
+            if (!key_res.is_some) break; // no more entries
+            char *key = (char *)key_res.value;
+            parser_result_t colon_res = parse_symbol(key_res.remaining, ':');
+            if (!colon_res.is_some) {
+                // '{key}' without ': type' is not valid, we treat it as parse
+                // failure
+                free(key);
+                free(entries);
+                return none(original_input);
+            }
+            parser_result_t type_res = parse_type(colon_res.remaining, true);
+            if (!type_res.is_some) {
+                // '{key:}' without type is not valid, we treat it as parse
+                // failure
+                free(key);
+                free(entries);
+                return none(original_input);
+            }
+            type_t *value_type = (type_t *)type_res.value;
+            entries = (type_map_entry_t *)realloc(
+                entries, sizeof(type_map_entry_t) * (count + 1));
+            strncpy(entries[count].key, key, 31);
+            entries[count].key[31] = '\0';
+            entries[count].value = value_type;
+            count++;
+            free(key);
+            parser_result_t comma_res = parse_symbol(type_res.remaining, ',');
+            if (comma_res.is_some) {
+                input = comma_res.remaining;
+            } else {
+                input = type_res.remaining;
+                break;
+            }
+        }
+        parser_result_t map_end = parse_symbol(input, '}');
+        if (!map_end.is_some) {
+            free(entries);
+            return none(original_input);
+        }
+        type_t *map_type = tc_make_t(VAL_MAP);
+        map_type->as.map.count = count;
+        map_type->as.map.entries = entries;
+        return some(map_type, map_end.remaining);
+    }
+    return none(original_input);
+}
+parser_result_t parse_type(const char *input, bool allow_complex_types) {
+    // try to parse directly first, if fail, then try to parse (type)
+    const char *original_input = input;
+    input = skip_spaces(input);
+    parser_result_t res = __parse_type(input, allow_complex_types);
+    if (res.is_some) { return res; }
+
+    // try to parse (type)
+    parser_result_t left_paren = parse_symbol(input, '(');
+    if (!left_paren.is_some) return none(original_input);
+    parser_result_t type_res = __parse_type(left_paren.remaining, true);
+    if (!type_res.is_some) return none(original_input);
+    parser_result_t right_paren = parse_symbol(type_res.remaining, ')');
+    if (!right_paren.is_some) return none(original_input);
+
+    return type_res;
+}
+
+/** ######################################################
+ */
+#define SKIP_SPACES                                                            \
+    { input = skip_spaces(input); }
+#define EXPECT_KEYWORD(kw)                                                     \
+    {                                                                          \
+        SKIP_SPACES;                                                           \
+        parser_result_t kw##_res =                                             \
+            parse_keyword(input, (const char *[]){#kw, NULL});                 \
+        if (!kw##_res.is_some || strcmp((char *)kw##_res.value, #kw) != 0) {   \
+            return anone(original_input);                                      \
+        }                                                                      \
+        input = kw##_res.remaining;                                            \
+        SKIP_SPACES;                                                           \
+    }
+#define EXPECT_SYMBOL(sym, fail)                                               \
+    {                                                                          \
+        SKIP_SPACES;                                                           \
+        parser_result_t re = parse_symbol(input, sym);                         \
+        if (!re.is_some) {                                                     \
+            fail;                                                              \
+            return anone(original_input);                                      \
+        }                                                                      \
+        input = re.remaining;                                                  \
+    }
+
+#define MAYBE_KEYWORD(kw, fail)                                                \
+    {                                                                          \
+        SKIP_SPACES;                                                           \
+        parser_result_t kw##_res =                                             \
+            parse_keyword(input, (const char *[]){#kw, NULL});                 \
+        if (!kw##_res.is_some || strcmp((char *)kw##_res.value, #kw) != 0) {   \
+            fail;                                                              \
+        }                                                                      \
+        input = kw##_res.remaining;                                            \
+        SKIP_SPACES;                                                           \
+    }
+#define MAYBE_SYMBOL(sym, fail)                                                \
+    {                                                                          \
+        parser_result_t re = parse_symbol(input, sym);                         \
+        if (!re.is_some) { fail; }                                             \
+        input = re.remaining;                                                  \
+        SKIP_SPACES;                                                           \
+    }
+Expr *ast_of_long(long v) {
+    Expr *expr = (Expr *)malloc(sizeof(Expr));
+    expr->kind = EXPR_ELONG;
+    expr->as.elong = v;
+    return expr;
+}
+ast_parser_result_t ast_parse_var_or_paren_expr(const char *input);
+ast_parser_result_t ast_parse_number(const char *input) {
+    parser_result_t res = parse_long(input);
+    if (!res.is_some) { return anone(input); }
+    long value = (long)(uintptr_t)res.value;
+    Expr *expr = (Expr *)malloc(sizeof(Expr));
+    expr->kind = EXPR_ELONG;
+    expr->as.elong = value;
+    if (res.remaining[0] != '.') {
+        // It's an integer, not a float
+        return asome(expr, res.remaining);
+    }
+    res.remaining++;
+    // It's a float!
+    expr->kind = EXPR_EFLOAT;
+    expr->as.efloat = (double)value;
+    res = parse_many(parse_digit, res.remaining);
+    if (!res.is_some) {
+        // no more digits, so its like "123." which is valid and should be
+        // treated as 123.0
+        return asome(expr, res.remaining);
+    }
+    double fraction = 0.0;
+    double divisor = 10.0;
+    list_t *digits = (list_t *)res.value;
+    while (digits) {
+        fraction += (uintptr_t)digits->value / divisor;
+        divisor *= 10.0;
+        digits = digits->next;
+    }
+    expr->as.efloat += fraction;
+    free_list((list_t *)res.value);
+    return asome(expr, res.remaining);
+}
+
+ast_parser_result_t ast_parse_variable(const char *input) {
+    parser_result_t res = parse_identifier(input);
+    if (!res.is_some) { return anone(input); }
+    char *name = (char *)res.value;
+    Expr *expr = (Expr *)malloc(sizeof(Expr));
+    expr->kind = EXPR_EVAR;
+    expr->as.evar = name;
+    return asome(expr, res.remaining);
+}
+
+ast_parser_result_t ast_parse_string(const char *input) {
+    const char *original_input = input;
+    EXPECT_SYMBOL('"', );
+    char *chars = NULL;
+    size_t len = 0;
+
+#define P_STR_APPEND_CHAR(c)                                                   \
+    {                                                                          \
+        len++;                                                                 \
+        chars = (char *)realloc(chars, len + 1);                               \
+        chars[len - 1] = (char)(c);                                            \
+        chars[len] = '\0';                                                     \
+    }
+
+    for (int i = 0; input[i]; i++) {
+        if (input[i] == '\\') {
+            // Handle escape sequences, supportes \n \t \" \xhh
+            if (input[i + 1] == 'n') {
+                P_STR_APPEND_CHAR('\n');
+            } else if (input[i + 1] == 't') {
+                P_STR_APPEND_CHAR('\t');
+            } else if (input[i + 1] == '"') {
+                P_STR_APPEND_CHAR('"');
+            } else if (input[i + 1] == 'x' && isxdigit(input[i + 2]) &&
+                       isxdigit(input[i + 3])) {
+                char hex[3] = {input[i + 2], input[i + 3], '\0'};
+                P_STR_APPEND_CHAR((char)strtol(hex, NULL, 16));
+                i += 2;
+            } else {
+                // Invalid escape sequence, treat as literal
+                P_STR_APPEND_CHAR(input[i + 1]);
+            }
+            i++;
+        } else {
+            if (input[i] == '"') {
+                input += i + 1;
+                Expr *expr = (Expr *)malloc(sizeof(Expr));
+                expr->kind = EXPR_ESTR;
+                expr->as.estr.data = chars;
+                expr->as.estr.length = len;
+                return asome(expr, input);
+            } else {
+                P_STR_APPEND_CHAR(input[i]);
+            }
+        }
+    }
+    fprintf(stderr, "Unterminated string literal\n");
+    free(chars);
+    exit(1);
+}
+ast_parser_result_t ast_parse_declaration(const char *input) {
+    const char *original_input = input;
+    const char *KEYWORDS[] = {"let", "const", NULL};
+    parser_result_t op = parse_keyword(input, KEYWORDS);
+    if (!op.is_some || (strcmp((char *)op.value, "let") != 0 &&
+                        strcmp((char *)op.value, "const") != 0)) {
+        return anone(original_input);
+    }
+    char *kind = (char *)op.value;
+    input = op.remaining;
+    parser_result_t id_res = parse_identifier(input);
+    if (!id_res.is_some) { return anone(original_input); }
+    char *name = (char *)id_res.value;
+    input = id_res.remaining;
+    EXPECT_SYMBOL('=', { free(name); });
+    ast_parser_result_t expr_res = ast__parse_expr(input);
+    if (!expr_res.is_some) {
+        free(name);
+        return anone(original_input);
+    }
+    input = expr_res.remaining;
+    DeclarationKind decl_kind =
+        strcmp(kind, "let") == 0 ? DECL_LET : DECL_CONST;
+    Expr *result = (Expr *)malloc(sizeof(Expr));
+    result->kind = EXPR_EDECLARATION;
+    result->as.declaration_node = (EDeclaration){
+        .kind = decl_kind,
+        .name = name,
+        .value = expr_res.value,
+    };
+    return asome(result, input);
+}
+
+ast_parser_result_t ast_parse_paren_expr(const char *input) {
+    const char *original_input = input;
+    EXPECT_SYMBOL('(', );
+    ast_parser_result_t inner = ast__parse_inline_expr(input);
+    if (!inner.is_some) { return anone(original_input); }
+    input = inner.remaining;
+    EXPECT_SYMBOL(')', ast_free(inner.value););
+    return asome(inner.value, input);
+}
+
+ast_parser_result_t ast_parse_brace_block(const char *input) {
+    const char *original_input = input;
+
+    EXPECT_SYMBOL('{', );
+
+    ast_parser_result_t body = ast_parse_expr_block(input);
+    if (!body.is_some) {
+        Expr *empty = (Expr *)malloc(sizeof(Expr));
+        empty->kind = EXPR_EBLOCK;
+        empty->as.block_node.exprs = NULL;
+        empty->as.block_node.count = 0;
+        body.value = empty;
+    }
+    input = body.remaining;
+
+    EXPECT_SYMBOL('}', ast_free(body.value););
+    return asome(body.value, input);
+}
+
+ast_parser_result_t ast_parse_if(const char *input) {
+    const char *original_input = input;
+    EXPECT_KEYWORD(if);
+    ast_parser_result_t ast_cond = ast_parse_paren_expr(input);
+    if (!ast_cond.is_some) { return anone(original_input); }
+    input = ast_cond.remaining;
+
+    ast_parser_result_t ast_then = ast_parse_brace_block(input);
+    if (!ast_then.is_some) {
+        ast_free(ast_cond.value);
+        return anone(original_input);
+    }
+
+    input = ast_then.remaining;
+
+    Expr *if_node = (Expr *)malloc(sizeof(Expr));
+    if_node->kind = EXPR_EIF;
+    if_node->as.if_node.cond = ast_cond.value;
+    if_node->as.if_node.then_branch = ast_then.value;
+    if_node->as.if_node.else_branch = NULL;
+    MAYBE_KEYWORD(else, { return asome(if_node, input); });
+
+    ast_parser_result_t ast_else = ast_parse_brace_block(input);
+    if_node->as.if_node.else_branch = ast_else.value;
+    input = ast_else.remaining;
+    return asome(if_node, input);
+}
+
+ast_parser_result_t ast_parse_binary_op(const char *input) {
+    const char *original_input = input;
+    ast_parser_result_t ast_left = ast__parse_inside_binary_op(input);
+    if (!ast_left.is_some) { return anone(original_input); }
+    input = ast_left.remaining;
+    parser_result_t op_res = parse_operator(input, OPERATORS);
+    if (!op_res.is_some) {
+        ast_free(ast_left.value);
+        return anone(original_input);
+    }
+    Operator op = (Operator)(uintptr_t)op_res.value;
+    input = op_res.remaining;
+    ast_parser_result_t ast_right = ast__parse_inline_expr(input);
+    if (!ast_right.is_some) {
+        ast_free(ast_left.value);
+        return anone(original_input);
+    }
+    input = ast_right.remaining;
+
+    // special case, if op is =, and left is a variable, then it's an assignment
+    if (op == O_ASSIGN && ast_left.value->kind == EXPR_EVAR) {
+        Expr *assign_node = (Expr *)malloc(sizeof(Expr));
+        assign_node->kind = EXPR_EASSIGNMENT;
+        assign_node->as.assignment_node.var_name = ast_left.value->as.evar;
+        assign_node->as.assignment_node.value = ast_right.value;
+        free(ast_left.value);
+        return asome(assign_node, input);
+    }
+
+    Expr *op_node = (Expr *)malloc(sizeof(Expr));
+    op_node->kind = EXPR_EOP;
+    op_node->as.op_node.op = op;
+    op_node->as.op_node.left = ast_left.value;
+    op_node->as.op_node.right = ast_right.value;
+    return asome(op_node, input);
+}
+
+ast_parser_result_t ast_parse_array_idx(const char *input) {
+    const char *original_input = input;
+    ast_parser_result_t ast_arr = ast_parse_var_or_paren_expr(input);
+    if (!ast_arr.is_some) { return anone(original_input); }
+    input = ast_arr.remaining;
+    EXPECT_SYMBOL('[', {
+        ast_free(ast_arr.value);
+        return anone(original_input);
+    });
+    ast_parser_result_t ast_idx = ast__parse_expr(input);
+    input = ast_idx.remaining;
+    parser_result_t mid_res = parse_symbol(input, ':');
+    input = mid_res.remaining;
+    ast_parser_result_t ast_end_idx =
+        mid_res.is_some ? ast__parse_expr(input) : anone(input);
+    input = ast_end_idx.remaining;
+    EXPECT_SYMBOL(']', {
+        ast_free(ast_arr.value);
+        if (ast_idx.is_some) { ast_free(ast_idx.value); }
+        if (ast_end_idx.is_some) { ast_free(ast_end_idx.value); }
+        return anone(original_input);
+    });
+
+    if (mid_res.is_some) {
+        // Handle slice
+        Expr *slice_node = (Expr *)malloc(sizeof(Expr));
+        slice_node->kind = EXPR_EARRAY_IDX_RANGE;
+        slice_node->as.array_idx_range_node.array = ast_arr.value;
+        // start defaults to 0
+        slice_node->as.array_idx_range_node.start =
+            ast_idx.is_some ? ast_idx.value : ast_of_long(0);
+        // end defaults to -1, which means the end of the array
+        slice_node->as.array_idx_range_node.end =
+            ast_end_idx.is_some ? ast_end_idx.value : ast_of_long(-1);
+        return asome(slice_node, input);
+    } else if (ast_idx.is_some) {
+        // Handle normal index
+        Expr *idx_node = (Expr *)malloc(sizeof(Expr));
+        idx_node->kind = EXPR_EARRAY_IDX;
+        idx_node->as.array_idx_node.array = ast_arr.value;
+        idx_node->as.array_idx_node.idx = ast_idx.value;
+        if (ast_end_idx.is_some) { ast_free(ast_end_idx.value); }
+        return asome(idx_node, input);
+    } else {
+        if (ast_idx.is_some) { ast_free(ast_idx.value); }
+        if (ast_end_idx.is_some) { ast_free(ast_end_idx.value); }
+        return anone(original_input);
+    }
+}
+
+ast_parser_result_t ast_parse_function(const char *input) {
+    const char *original_input = input;
+    EXPECT_KEYWORD(def);
+    parser_result_t id_res = parse_identifier(input);
+    input = id_res.remaining;
+    EXPECT_SYMBOL('(', {
+        free(id_res.value);
+        return anone(original_input);
+    });
+    LIST(char *) param_names = NULL;
+    list_init(char *, param_names);
+    LIST(type_t *) param_types = NULL;
+    list_init(type_t *, param_types);
+
+    goto _L_CONTINUE;
+
+    // this label is used to free all the allocated memory for parameters and
+    // return
+_L_FREE_ALL_AND_RETURN_NONE:
+    free(id_res.value);
+    for (size_t i = 0; i < list_count(param_names); i++) {
+        free(param_names[i]);
+    }
+    list_free(param_names);
+    list_free(param_types);
+    return anone(original_input);
+
+_L_CONTINUE:
+
+    while (1) {
+        // parse parameter name and type, the syntax is "name: type"
+        parser_result_t param_res = parse_identifier(input);
+        if (!param_res.is_some) { break; }
+        input = param_res.remaining;
+        EXPECT_SYMBOL(':', {
+            free(param_res.value);
+            goto _L_FREE_ALL_AND_RETURN_NONE;
+        });
+        parser_result_t type_res = parse_type(input, true);
+        if (!type_res.is_some) {
+            free(param_res.value);
+            goto _L_FREE_ALL_AND_RETURN_NONE;
+        }
+        list_push(char *, param_names, param_res.value);
+        list_push(type_t *, param_types, (type_t *)type_res.value);
+        input = type_res.remaining;
+        parser_result_t comma_res = parse_symbol(input, ',');
+        if (comma_res.is_some) {
+            input = comma_res.remaining;
+        } else {
+            break;
+        }
+    }
+    EXPECT_SYMBOL(')', goto _L_FREE_ALL_AND_RETURN_NONE;);
+    type_t *return_type = _TYPE_INFERRED;
+    parser_result_t arrow_res =
+        parse_operator(input, (const char *[]){"->", NULL});
+    if (arrow_res.is_some) {
+        input = arrow_res.remaining;
+        parser_result_t return_type_res = parse_type(input, false);
+        if (!return_type_res.is_some) { goto _L_FREE_ALL_AND_RETURN_NONE; }
+        return_type = (type_t *)return_type_res.value;
+        input = return_type_res.remaining;
+    }
+
+    ast_parser_result_t body_res = ast_parse_brace_block(input);
+    if (!body_res.is_some) goto _L_FREE_ALL_AND_RETURN_NONE;
+    input = body_res.remaining;
+    Expr *func_node = (Expr *)malloc(sizeof(Expr));
+    func_node->kind = EXPR_EFUNC;
+    func_node->as.efunc = (EFunc){
+        .param_count = list_count(param_names),
+        .param_names = param_names,
+        .param_types = param_types,
+        .return_type = return_type,
+        .body = body_res.value,
+        .external = false,
+    };
+    if (id_res.is_some) {
+        // If function has a name, we treat it as a declaration in the current
+        // scope
+        Expr *decl_node = (Expr *)malloc(sizeof(Expr));
+        decl_node->kind = EXPR_EDECLARATION;
+        decl_node->as.declaration_node.kind = DECL_FUNC;
+        decl_node->as.declaration_node.name = (char *)id_res.value;
+        decl_node->as.declaration_node.value = func_node;
+        return asome(decl_node, input);
+    } else {
+        // Anonymous function, just return the function node
+        return asome(func_node, input);
+    }
+}
+
+ast_parser_result_t ast_parse_var_or_paren_expr(const char *input) {
+    // this will work either for just a identifier, or a parenthesized
+    // expression.
+    ast_parser_result_t var_res = ast_parse_variable(input);
+    if (var_res.is_some) { return var_res; }
+    return ast_parse_paren_expr(input);
+}
+
+ast_parser_result_t ast_parse_function_call(const char *input) {
+    const char *original_input = input;
+    ast_parser_result_t ast_callee = ast_parse_var_or_paren_expr(input);
+    if (!ast_callee.is_some) { return anone(original_input); }
+    input = ast_callee.remaining;
+    EXPECT_SYMBOL('(', {
+        ast_free(ast_callee.value);
+        return anone(original_input);
+    });
+    Expr **args = NULL;
+    size_t arg_count = 0;
+    while (1) {
+        ast_parser_result_t arg_res = ast__parse_expr(input);
+        if (!arg_res.is_some) { break; }
+        input = arg_res.remaining;
+        arg_count++;
+        args = (Expr **)realloc(args, sizeof(Expr *) * arg_count);
+        args[arg_count - 1] = (Expr *)arg_res.value;
+        EXPECT_SYMBOL(',', { break; });
+    }
+    EXPECT_SYMBOL(')', {
+        for (size_t i = 0; i < arg_count; i++) { ast_free(args[i]); }
+        free(args);
+        ast_free(ast_callee.value);
+        return anone(original_input);
+    });
+    Expr *call_node = (Expr *)malloc(sizeof(Expr));
+    call_node->kind = EXPR_ECALL;
+    call_node->as.call_node.callee = ast_callee.value;
+    call_node->as.call_node.arg_count = arg_count;
+    call_node->as.call_node.args = args;
+    return asome(call_node, input);
+}
+
+ast_parser_result_t ast_parse_map(const char *input) {
+    // works like this
+    // {key: value, key: value, ...}
+    const char *original_input = input;
+    EXPECT_SYMBOL('{', );
+    LIST(EMapEntry) entries = NULL;
+    list_init(EMapEntry, entries);
+    goto _L_TRY_PARSE;
+
+_L_PARSE_MAP_FAILED:
+    printf("Failed to parse map, cleaning up allocated memory\n");
+    for (size_t i = 0; i < list_count(entries); i++) {
+        free(entries[i].key);
+        ast_free(entries[i].value);
+    }
+    list_free(entries);
+    return anone(original_input);
+
+_L_TRY_PARSE:
+    while (1) {
+        parser_result_t key_res = parse_identifier(input);
+        if (!key_res.is_some) { break; }
+        input = key_res.remaining;
+        Expr *value_node = NULL;
+        parser_result_t re = parse_symbol(input, ':');
+        input = re.remaining;
+        if (!re.is_some) {
+            // shorthand for {key: key}
+            value_node = (Expr *)malloc(sizeof(Expr));
+            value_node->kind = EXPR_EVAR;
+            value_node->as.evar = (char *)key_res.value;
+        } else {
+            ast_parser_result_t value_res = ast__parse_expr(input);
+            if (!value_res.is_some) {
+                free(key_res.value);
+                goto _L_PARSE_MAP_FAILED;
+            }
+            input = value_res.remaining;
+            value_node = value_res.value;
+        }
+        EMapEntry entry = {
+            .key = (char *)key_res.value,
+            .value = value_node,
+        };
+        list_push(EMapEntry, entries, entry);
+        parser_result_t comma_res = parse_symbol(input, ',');
+        if (comma_res.is_some) {
+            input = comma_res.remaining;
+        } else {
+            break;
+        }
+    }
+    EXPECT_SYMBOL('}', goto _L_PARSE_MAP_FAILED;);
+    Expr *map_node = (Expr *)malloc(sizeof(Expr));
+    map_node->kind = EXPR_EMAP;
+    map_node->as.map_node.count = list_count(entries);
+    map_node->as.map_node.entries = entries;
+    return asome(map_node, input);
+}
+
+ast_parser_result_t ast_parse_array(const char *input) {
+    // works like this
+    // [value, value, ...]
+    const char *original_input = input;
+    EXPECT_SYMBOL('[', );
+    LIST(Expr *) elements = NULL;
+    list_init(Expr *, elements);
+    while (1) {
+        ast_parser_result_t elem_res = ast__parse_expr(input);
+        if (!elem_res.is_some) { break; }
+        input = elem_res.remaining;
+        list_push(Expr *, elements, elem_res.value);
+        EXPECT_SYMBOL(',', { break; });
+    }
+    EXPECT_SYMBOL(']', {
+        for (size_t i = 0; i < list_count(elements); i++) {
+            ast_free(list_get(elements, i));
+        }
+        list_free(elements);
+        return anone(original_input);
+    });
+    Expr *array_node = (Expr *)malloc(sizeof(Expr));
+    array_node->kind = EXPR_EARRAY;
+    array_node->as.array_node.count = list_count(elements);
+    array_node->as.array_node.elements = elements;
+    return asome(array_node, input);
+}
+
+ast_parser_result_t ast__parse_first(const ast_parser_t *parsers,
+                                     const char *input) {
+    while (*parsers) {
+        ast_parser_result_t res = (*parsers)(input);
+        if (res.is_some) { return res; }
+        parsers++;
+    }
+    return anone(input);
+}
+
+#define __EXPR_BLOCK_PARSERS ast_parse_brace_block
+
+#define __EXPR_INLINE_PARSERS                                                  \
+    ast_parse_function, ast_parse_map, ast_parse_array, ast_parse_binary_op,   \
+        ast_parse_function_call, ast_parse_paren_expr, ast_parse_if,           \
+        ast_parse_declaration, ast_parse_number, ast_parse_string,             \
+        ast_parse_array_idx, ast_parse_variable
+
+const ast_parser_t EXPR_BLOCK_PARSERS[] = {__EXPR_BLOCK_PARSERS, NULL};
+const ast_parser_t EXPR_INLINE_PARSERS[] = {__EXPR_INLINE_PARSERS, NULL};
+const ast_parser_t EXPR_PARSERS[] = {__EXPR_INLINE_PARSERS,
+                                     __EXPR_BLOCK_PARSERS, NULL};
+const ast_parser_t EXPR_ALLOWED_BIN_OPS[] = {
+    ast_parse_paren_expr, ast_parse_function_call,
+    ast_parse_map,        ast_parse_array,
+
+    ast_parse_number,     ast_parse_string,
+    ast_parse_variable,   NULL};
+
+ast_parser_result_t ast__parse_expr(const char *input) {
+    return ast__parse_first(EXPR_PARSERS, input);
+}
+
+ast_parser_result_t ast__parse_inline_expr(const char *input) {
+    return ast__parse_first(EXPR_INLINE_PARSERS, input);
+}
+
+ast_parser_result_t ast__parse_inside_binary_op(const char *input) {
+    return ast__parse_first(EXPR_ALLOWED_BIN_OPS, input);
+}
+
+/**
+Guaranteed to not return anone, will return asome with value NULL if no
+expressions are found
+*/
+ast_parser_result_t ast_parse_expr_block(const char *input) {
+    const char *original_input = input;
+    Expr **list = NULL;
+    size_t count = 0;
+    while (1) {
+        ast_parser_result_t res = ast__parse_expr(input);
+        if (!res.is_some) { break; }
+        list = (Expr **)realloc(list, sizeof(Expr *) * (count + 1));
+        list[count] = res.value;
+        count++;
+        input = res.remaining;
+        input = skip_spaces(input);
+        if (*input == ';') {
+            input++;
+        } else {
+            break;
+        }
+    }
+    if (count == 0) { return anone(original_input); }
+    Expr *block = (Expr *)malloc(sizeof(Expr));
+    block->kind = EXPR_EBLOCK;
+    block->as.block_node.exprs = list;
+    block->as.block_node.count = count;
+    return asome(block, input);
+}
