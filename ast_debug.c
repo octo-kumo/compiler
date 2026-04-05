@@ -189,8 +189,9 @@ void ast_walk(Expr *expr, int indent) {
         break;
     case EXPR_EFUNC:
         printf(ANSI_BLUE "EFunc" ANSI_RESET "  " ANSI_DIM
-                         "param_count=%zu" ANSI_RESET "\n",
-               expr->as.efunc.param_count);
+                         "param_count=%zu return_type=%s" ANSI_RESET "\n",
+               expr->as.efunc.param_count,
+               type_t_to_str(expr->as.efunc.return_type));
         for (size_t i = 0; i < expr->as.efunc.param_count; i++) {
             ast_indent(indent + 1);
             printf(ANSI_DIM "param_name=" ANSI_RESET ANSI_BOLD
@@ -369,7 +370,8 @@ void ast_print_code(FILE *out, Expr *expr, int indent) {
                     expr->as.efunc.param_names[i],
                     type_t_to_str(expr->as.efunc.param_types[i]));
         }
-        fprintf(out, ") ");
+        fprintf(out, ") -> " ANSI_CYAN "%s" ANSI_RESET " ",
+                type_t_to_str(expr->as.efunc.return_type));
         ast_print_code(out, expr->as.efunc.body, indent);
         break;
     case EXPR_ESTR: {

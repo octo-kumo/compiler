@@ -131,7 +131,8 @@ typecheck_result_t tc_binary_op(Expr *expr, TCVarTypeScope *scope) {
         expr->as.op_node.op == O_ADD || expr->as.op_node.op == O_SUB ||
         expr->as.op_node.op == O_MUL || expr->as.op_node.op == O_DIV ||
         expr->as.op_node.op == O_LT || expr->as.op_node.op == O_GT ||
-        expr->as.op_node.op == O_LTE || expr->as.op_node.op == O_GTE;
+        expr->as.op_node.op == O_LTE || expr->as.op_node.op == O_GTE ||
+        expr->as.op_node.op == O_MOD;
 
     // these ops can work on any two values of the same type or if one of them
     // is null
@@ -142,7 +143,8 @@ typecheck_result_t tc_binary_op(Expr *expr, TCVarTypeScope *scope) {
 
     bool output_numeric =
         expr->as.op_node.op == O_ADD || expr->as.op_node.op == O_SUB ||
-        expr->as.op_node.op == O_MUL || expr->as.op_node.op == O_DIV;
+        expr->as.op_node.op == O_MUL || expr->as.op_node.op == O_DIV ||
+        expr->as.op_node.op == O_MOD;
     bool output_bool =
         expr->as.op_node.op == O_AND || expr->as.op_node.op == O_OR ||
         expr->as.op_node.op == O_LT || expr->as.op_node.op == O_GT ||
@@ -171,6 +173,10 @@ typecheck_result_t tc_binary_op(Expr *expr, TCVarTypeScope *scope) {
                             left_res.type->base == VAL_FLOAT) ||
                           !(right_res.type->base == VAL_LONG ||
                             right_res.type->base == VAL_FLOAT))) {
+        printf("left type: %s ", type_t_to_str(left_res.type));
+        printf("right type: %s\n", type_t_to_str(right_res.type));
+        printf("left base: %d, right base: %d\n", left_res.type->base,
+               right_res.type->base);
         return TC_ERR("Operands of numeric operator must be numeric", expr);
     }
     if (input_types_match_or_one_is_null &&
@@ -362,10 +368,7 @@ typecheck_result_t tc_expr(Expr *expr, TCVarTypeScope *scope) {
     case EXPR_EFUNC: return tc_function(expr, scope);
     case EXPR_EVAR: {
         type_t *var_type = tc_scope_get(scope, expr->as.evar);
-        if (!var_type) {
-            print_scope(scope);
-            return TC_ERR("Undefined variable", expr);
-        }
+        if (!var_type) { return TC_ERR("Undefined variable", expr); }
         return TC_OK(var_type);
     }
     case EXPR_EIF: return tc_if(expr, scope);

@@ -68,14 +68,42 @@ DEFINE_EXTERNAL_FUNC(typeof, x, _VAL_INFERRED, VAL_TYPE, {
         return nval(VAL_NULL);
     }
 });
+DEFINE_EXTERNAL_FUNC(range, x, VAL_LONG, VAL_ARR, {
+    if (x) {
+        if (x->type != VAL_LONG) {
+            printf("range: argument must be a long\n");
+            return nval(VAL_NULL);
+        }
+        long n = x->data.l;
+        if (n < 0) {
+            printf("range: argument must be non-negative\n");
+            return nval(VAL_NULL);
+        }
+        VMValue *result = nval(VAL_ARR);
+        VMArray *arr = malloc(sizeof(VMArray));
+        result->data.arr = arr;
+        result->data.arr->count = n;
+        result->data.arr->elements = malloc(sizeof(VMValue *) * n);
+        for (long i = 0; i < n; i++) {
+            result->data.arr->elements[i] = nval(VAL_LONG);
+            result->data.arr->elements[i]->data.l = i;
+        }
+        return result;
+    } else {
+        printf("range: missing argument 'x'\n");
+        return nval(VAL_NULL);
+    }
+});
 
 void populate_types(TCVarTypeScope *scope) {
     map_set(&scope->variables, "print", print_type);
     map_set(&scope->variables, "tostring", tostring_type);
     map_set(&scope->variables, "typeof", typeof_type);
+    map_set(&scope->variables, "range", range_type);
 }
 void populate_scope(VMVariableScope *scope) {
     map_set(&scope->variables, "print", __external_print_func);
     map_set(&scope->variables, "tostring", __external_tostring_func);
     map_set(&scope->variables, "typeof", __external_typeof_func);
+    map_set(&scope->variables, "range", __external_range_func);
 }

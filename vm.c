@@ -446,6 +446,20 @@ VMValue *vm_execute(VMVariableScope *scope, Expr *expr) {
             __ISCALCULATION(*);
             break;
         }
+        case O_MOD: {
+            if (left->type != VAL_LONG || right->type != VAL_LONG) {
+                fprintf(stderr,
+                        "Operands of modulus operator must be integers\n");
+                exit(1);
+            }
+            if (right->data.l == 0) {
+                fprintf(stderr, "Division by zero in modulus operator\n");
+                exit(1);
+            }
+            val->data.l = left->data.l % right->data.l;
+            val->type = VAL_LONG;
+            break;
+        }
         case O_DIV: {
             __ISCALCULATION(/);
             break;

@@ -5,8 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-const char *OPERATORS[] = {"<=", ">=", "&&", "||", "==", "!=", "+", "-",
-                           "*",  "/",  "=",  "<",  ">",  "::", ".", NULL};
+const char *OPERATORS[] = {"<=", ">=", "&&", "||", "==", "!=", "+", "-", "*",
+                           "/",  "=",  "<",  ">",  "::", ".",  "%", NULL};
 
 Operator operator_from_str(const char *op) {
     for (size_t i = 0; OPERATORS[i]; i++) {
