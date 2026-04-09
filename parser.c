@@ -35,13 +35,32 @@ void *char_to_sign(void *c) {
 
 int is_digit(char c) { return c >= '0' && c <= '9'; }
 int is_alpha(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
+           is_digit(c);
 }
 int is_number_sign(char c) { return c == '+' || c == '-'; }
 int is_space(char c) { return c == ' ' || c == '\t' || c == '\n'; }
 
 char *skip_spaces(const char *input) {
-    while (*input && is_space(*input)) { input++; }
+    while (*input) {
+        // Skip whitespace
+        if (is_space(*input)) {
+            input++;
+        }
+        // Skip single-line comments: // ... \n
+        else if (input[0] == '/' && input[1] == '/') {
+            input += 2;
+            while (*input && *input != '\n') input++;
+        }
+        // Skip multi-line comments: /* ... */
+        else if (input[0] == '/' && input[1] == '*') {
+            input += 2;
+            while (*input && !(input[0] == '*' && input[1] == '/')) input++;
+            if (*input) input += 2; // consume closing '*/'
+        } else {
+            break;
+        }
+    }
     return (char *)input;
 }
 
@@ -208,6 +227,13 @@ parser_result_t parse_identifier(const char *input) {
             free_list((list_t *)res.value);
             return none(original_input);
         }
+    }
+
+    // check if identifier starts with number
+    if (is_digit(identifier[0])) {
+        free(identifier);
+        free_list((list_t *)res.value);
+        return none(original_input);
     }
 
     free_list((list_t *)res.value);
@@ -397,7 +423,7 @@ parser_result_t parse_type(const char *input, bool allow_complex_types) {
     if (!type_res.is_some) return none(original_input);
     parser_result_t right_paren = parse_symbol(type_res.remaining, ')');
     if (!right_paren.is_some) return none(original_input);
-
+    type_res.remaining = right_paren.remaining;
     return type_res;
 }
 
@@ -496,6 +522,27 @@ ast_parser_result_t ast_parse_variable(const char *input) {
     return asome(expr, res.remaining);
 }
 
+ast_parser_result_t ast_parse_true_false(const char *input) {
+    const char *original_input = input;
+    parser_result_t true_res =
+        parse_keyword(input, (const char *[]){"true", NULL});
+    if (true_res.is_some) {
+        Expr *expr = (Expr *)malloc(sizeof(Expr));
+        expr->kind = EXPR_EBOOL;
+        expr->as.ebool = true;
+        return asome(expr, true_res.remaining);
+    }
+    parser_result_t false_res =
+        parse_keyword(input, (const char *[]){"false", NULL});
+    if (false_res.is_some) {
+        Expr *expr = (Expr *)malloc(sizeof(Expr));
+        expr->kind = EXPR_EBOOL;
+        expr->as.ebool = false;
+        return asome(expr, false_res.remaining);
+    }
+    return anone(original_input);
+}
+
 ast_parser_result_t ast_parse_string(const char *input) {
     const char *original_input = input;
     EXPECT_SYMBOL('"', );
@@ -560,6 +607,19 @@ ast_parser_result_t ast_parse_declaration(const char *input) {
     if (!id_res.is_some) { return anone(original_input); }
     char *name = (char *)id_res.value;
     input = id_res.remaining;
+
+    SKIP_SPACES;
+    if (input[0] == ':') {
+        // type annotation will just be parsed and ignored for now.
+        input++;
+        parser_result_t type_res = parse_type(input, true);
+        if (!type_res.is_some) {
+            free(name);
+            return anone(original_input);
+        }
+        input = type_res.remaining;
+    }
+
     EXPECT_SYMBOL('=', { free(name); });
     ast_parser_result_t expr_res = ast__parse_expr(input);
     if (!expr_res.is_some) {
@@ -868,7 +928,6 @@ ast_parser_result_t ast_parse_map(const char *input) {
     goto _L_TRY_PARSE;
 
 _L_PARSE_MAP_FAILED:
-    printf("Failed to parse map, cleaning up allocated memory\n");
     for (size_t i = 0; i < list_count(entries); i++) {
         free(entries[i].key);
         ast_free(entries[i].value);
@@ -888,7 +947,7 @@ _L_TRY_PARSE:
             // shorthand for {key: key}
             value_node = (Expr *)malloc(sizeof(Expr));
             value_node->kind = EXPR_EVAR;
-            value_node->as.evar = (char *)key_res.value;
+            value_node->as.evar = strdup((char *)key_res.value);
         } else {
             ast_parser_result_t value_res = ast__parse_expr(input);
             if (!value_res.is_some) {
@@ -948,6 +1007,7 @@ ast_parser_result_t ast_parse_array(const char *input) {
 
 ast_parser_result_t ast__parse_first(const ast_parser_t *parsers,
                                      const char *input) {
+    SKIP_SPACES;
     while (*parsers) {
         ast_parser_result_t res = (*parsers)(input);
         if (res.is_some) { return res; }
@@ -962,18 +1022,22 @@ ast_parser_result_t ast__parse_first(const ast_parser_t *parsers,
     ast_parse_function, ast_parse_map, ast_parse_array, ast_parse_binary_op,   \
         ast_parse_function_call, ast_parse_paren_expr, ast_parse_if,           \
         ast_parse_declaration, ast_parse_number, ast_parse_string,             \
-        ast_parse_array_idx, ast_parse_variable
+        ast_parse_array_idx, ast_parse_true_false, ast_parse_variable
 
 const ast_parser_t EXPR_BLOCK_PARSERS[] = {__EXPR_BLOCK_PARSERS, NULL};
 const ast_parser_t EXPR_INLINE_PARSERS[] = {__EXPR_INLINE_PARSERS, NULL};
 const ast_parser_t EXPR_PARSERS[] = {__EXPR_INLINE_PARSERS,
                                      __EXPR_BLOCK_PARSERS, NULL};
-const ast_parser_t EXPR_ALLOWED_BIN_OPS[] = {
-    ast_parse_paren_expr, ast_parse_function_call,
-    ast_parse_map,        ast_parse_array,
+const ast_parser_t EXPR_ALLOWED_BIN_OPS[] = {ast_parse_paren_expr,
+                                             ast_parse_function_call,
+                                             ast_parse_map,
+                                             ast_parse_array,
 
-    ast_parse_number,     ast_parse_string,
-    ast_parse_variable,   NULL};
+                                             ast_parse_number,
+                                             ast_parse_string,
+                                             ast_parse_true_false,
+                                             ast_parse_variable,
+                                             NULL};
 
 ast_parser_result_t ast__parse_expr(const char *input) {
     return ast__parse_first(EXPR_PARSERS, input);

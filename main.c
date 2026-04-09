@@ -101,12 +101,16 @@ int main(int argc, char *argv[]) {
     }
     ast_parser_result_t res = ast_parse_expr_block(input);
     if (res.is_some) {
-        printf("success :: remaining='%s'\n", res.remaining);
+        printf("success\n");
         ast_walk(res.value, 0);
         ast_print_code(stdout, res.value, 0);
         printf("\n\n");
         run_tc(res.value);
         run_vm(res.value);
+
+        if (res.remaining[0] != '\0') {
+            printf("Warning: Unparsed input remaining: '%s'\n", res.remaining);
+        }
     } else {
         printf("failed :: remaining='%s'\n", res.remaining);
     }
