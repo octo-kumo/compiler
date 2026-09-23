@@ -3,3 +3,6 @@
 vgcore.*
 compiler
 .vscode/
+ycc
+yboot
+cycc

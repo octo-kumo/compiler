@@ -1,3 +1,21 @@
+# update!
+
+now it is self hosting and does not rely on gcc or cc!
+
+do `make ycc`
+
+and you may compile .y programs like this
+
+```./
+ycc [-o OUTPUT] [-S] [-t] [--no-exec] [-h] FILE
+   (no flags)   compile FILE to a native executable (default output: a.out)
+   -o OUTPUT    output path (executable, or .s file with -S)
+   -S           emit assembly only (stdout, or the -o file)
+   -t, --time   print per-phase time and heap use to stderr
+   -h, --help   show this text and exit
+```
+
+
 # what is this?
 
 Just some attempt at a AST parser for a simple programming language that takes inspirations from random places.
